@@ -15,5 +15,3 @@ torchaudio==2.1.1
 tqdm
 yapf
 lpips
-pyiqa # PyTorch Toolbox for Image Quality Assessment
-# gdown # supports downloading the large file from Google Drive
