@@ -57,4 +57,21 @@ conda create -n envname python=3.8
 conda activate envname
 pip install pytorch=1.13 
 pip install -r requirements.txt
+# install basicsr
+python basicsr/setup.py develop
+# Compile kernels for VSSM
+cd ./kernels/selective_scan
+pip install .
+```
+
+## Inference and Calsulate
+``` 
+# LOL-Blur
+python inference.py
+python calculate_pair.py
+
+
+# Real-LOL-Blur
+python inference.py
+python calculate_unpair.py
 ```
