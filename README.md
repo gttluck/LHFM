@@ -73,7 +73,7 @@ cd ./kernels/selective_scan
 pip install .
 ```
 
-## Inference and Calsulate
+## Inference and Calculate
 ``` 
 # LOL-Blur
 python inference.py
