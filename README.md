@@ -28,6 +28,12 @@
 
 </details>
 
+<details>
+<summary>Exdark:</summary>
+
+![本地图片](./figures/exdark.png "示例图片")
+
+</details>
 
 
 
@@ -35,11 +41,14 @@
 
 
 <details>
-<summary>LOL-Blur and Real-LOL-Blur:</summary>
+<summary>LOL-Blur:</summary>
 
 ![本地图片](./figures/lol-blur-s.png "示例图片")
+</details>
 
-LOLv1 without GT mean:
+<details>
+<summary>Real-LOL-Blur:</summary>
+
 ![本地图片](./figures/real-s.png "示例图片")
 </details>
 
