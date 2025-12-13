@@ -77,7 +77,7 @@ class CHECKS:
                 downsample = kwargs.get("downsample", None)
                 blocks = layer.blocks
             
-                if True: # is this really applied? Yes, but been overriden later in VSSM!
+                if True: 
                     def _init_weights(module: nn.Module):
                         for name, p in module.named_parameters():
                             if name in ["out_proj.weight"]:

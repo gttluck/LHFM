@@ -7,7 +7,7 @@ import numbers
 from einops import rearrange
 
 from basicsr.utils.registry import ARCH_REGISTRY
-from .vmamba import VSSLocalBlock
+from .model import VSSFusionBlock
 
 ##########################################################################
 ## Overlapped image patch embedding with 3x3 Conv
@@ -48,7 +48,7 @@ class Upsample(nn.Module):
 
 
 @ARCH_REGISTRY.register()
-class LIED(nn.Module):
+class LHF(nn.Module):
     def __init__(self, 
         inp_channels=3, 
         out_channels=3,
@@ -57,7 +57,7 @@ class LIED(nn.Module):
         num_refinement_blocks = 2,
     ):
 
-        super(LIED, self).__init__()
+        super(LHF, self).__init__()
 
         self.patch_embed = OverlapPatchEmbed(inp_channels, dim)
 
@@ -114,7 +114,4 @@ class LIED(nn.Module):
         
         out_dec_level1 = self.output(out_dec_level1) + inp_img
         
-        if side_loss:
-            return out_side, out_dec_level1
-        else:
-            return out_dec_level1
+    

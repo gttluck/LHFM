@@ -14,6 +14,8 @@ from torch.fft import rfft2
 from einops import rearrange, repeat
 from timm.models.layers import DropPath, trunc_normal_
 from fvcore.nn import FlopCountAnalysis, flop_count_str, flop_count, parameter_count
+from pytorch_wavelets import DWTForward
+
 DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 
 # triton cross scan, 2x speed than pytorch implementation =========================
@@ -1287,48 +1289,13 @@ class SS2D(nn.Module):
         return out
 
 
-##########################################################################
-## Local Feature Modulation Layer
-# class LocalFeatureModule(nn.Module):
-#     def __init__(self, dim, growth_rate=2.0):
-#         super().__init__()
-#         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-
-#         hidden_dim = int(dim // growth_rate)
-
-#         self.weight = nn.Sequential(
-#             nn.Conv2d(dim, hidden_dim, 1, 1, 0),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim, dim, 1, 1, 0),
-#             nn.Sigmoid()
-#         )
-
-#     def forward(self, x):
-#         y = self.avg_pool(x)
-#         y = self.weight(y)
-#         return x*y
-    
-# 对LFM的改进  
-#  特性	                    说明
-# 通道注意力	保留原有 LFM 的通道压缩响应能力
-# 亮度引导注意力	使用亮度图作为辅助引导，引导注意力集中到暗区
-# 空间分布增强	由亮度引导产生空间位置相关的加权 mask
-# 融合策略	使用 1×1 Conv 融合两个注意力源，自适应选择增强策略
-# 该模块尤其适合在：
-
-# 局部区域过暗但有重要结构信息；
-
-# 全图亮度变化剧烈；
-
-# 模糊发生在暗部区域
-#class LightAwareLFM(nn.Module):
-class LocalFeatureModule(nn.Module):
+class LAM(nn.Module):
     def __init__(self, dim, growth_rate=2.0):
         super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         hidden_dim = int(dim // growth_rate)
 
-        # 通道注意力路径（原始 LFM）
+        # 通道注意力路径（原始 LFM） 用于控制每个通道的重要性
         self.channel_attn = nn.Sequential(
             nn.Conv2d(dim, hidden_dim, 1, 1, 0),
             nn.ReLU(inplace=True),
@@ -1355,20 +1322,20 @@ class LocalFeatureModule(nn.Module):
         # 亮度图（近似 Y 分量）
         with torch.no_grad():
             luminance = (0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3])  # [B,1,H,W]
-        ba = self.brightness_conv(luminance)   # → [B,C,H,W]
+        ba = self.brightness_conv(luminance)   # [B,C,1,1] → [B,C,H,W]
 
         # 上采通道注意力到空间位置（广播）
         ca_upsampled = ca.expand_as(ba)        # [B,C,H,W]
 
         # 融合两个注意力引导
-        attn = self.fuse(torch.cat([ca_upsampled, ba], dim=1))  # [B, 2C, H, W] → [B,C,H,W]
+        attn = self.fuse(torch.cat([ca_upsampled, ba], dim=1))  # [B, C, H, W] → [B,2C,H,W] → [B, C, H, W]
 
         return x * attn
-##########################################################################
-# Dual Gated-Dconv Feed-Forward Network (GDFN) (three-branch)
-class DGDFeedForward(nn.Module):
+        
+
+class LDGFFN(nn.Module):
     def __init__(self, dim, ffn_expansion_factor, bias):
-        super(DGDFeedForward, self).__init__()
+        super(LDGFFN, self).__init__()
 
         hidden_features = int(dim*ffn_expansion_factor)
         self.project_in1 = nn.Conv2d(dim, hidden_features*2, kernel_size=1, bias=bias)
@@ -1385,9 +1352,9 @@ class DGDFeedForward(nn.Module):
     def forward(self, input):
         x = self.project_in1(input)
         x1, x2 = x.chunk(2, dim=1)
-        #x1 = F.relu(self.dwconv1(x1))
-        #x2 = F.relu(self.dwconv2(x2))
-        x12=x1*x2
+        # x1 = F.relu(self.dwconv1(x1))
+        # x2 = F.relu(self.dwconv2(x2))
+        x12 = x1*x2
         
         x3 = self.dwconv3(self.project_in2(input))
         
@@ -1396,99 +1363,27 @@ class DGDFeedForward(nn.Module):
         
         return output
 
+class HFR(nn.Module):
+    def __init__(self, in_ch):
+        super().__init__()
+        self.dwt = DWTForward(J=1, wave='haar')
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch * 3, in_ch, 3, 1, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch, in_ch, 3, 1, 1)
+        )
+
+    def forward(self, x):
+        # x: (B, C, H, W)
+        _, _, H, W = x.shape
+        Yl, Yh = self.dwt(x)  # Yh[0]: (B, 3, C, H/2, W/2)
+        hf = Yh[0].permute(0, 2, 1, 3, 4).reshape(x.size(0), x.size(1)*3, H//2, W//2)
+        hf = self.conv(hf)
+        hf = F.interpolate(hf, size=(H, W), mode='bilinear', align_corners=False)
+        return hf
 
 
-# def same_pad(ksize: int, dilation: int = 1) -> int:
-#     """给定 kernel & dilation 计算保持 H/W 不变所需的 padding"""
-#     return dilation * (ksize - 1) // 2            # 只适用于奇数 kernel
-
-# class BlurAwareFFN(nn.Module):
-#     """
-#     BM-D²FFN：Blur-Aware Multi-Scale Dual-Domain Feed-Forward Network
-#     --------------------------------------------------------------
-#     * 输入 / 输出张量尺寸与原 DGDFFN 完全一致 : (B, C, H, W)
-#     * 额外参数 ≈ +0.25 M，可直接替换
-#     """
-#     def __init__(self,
-#                  dim       : int,    # 输入/输出通道
-#                  expansion : float = 2.66,
-#                  bias      : bool  = False,
-#                  k_large   : int   = 7,     # 大核尺寸
-#                  dil_large : int   = 3):    # 大核 dilation
-#         super().__init__()
-#         hid = int(dim * expansion)          # 隐藏通道数
-
-#         # ------- ① 主干分支：增强感受野 (3×3 + LKA) -------
-#         self.pw_main = nn.Conv2d(dim, hid, 1, bias=bias)  # 1×1 升维
-#         self.dw3     = nn.Conv2d(hid, hid, 3, 1, 1,
-#                                  groups=hid, bias=bias)
-#         # LKA：5×5 + 7×7(dil=3) 深度卷积串联
-#         self.lka = nn.Sequential(
-#             nn.Conv2d(hid, hid, 5, 1, same_pad(5), groups=hid, bias=bias),
-#             nn.Conv2d(hid, hid, k_large, 1,
-#                       same_pad(k_large, dil_large),
-#                       dilation=dil_large, groups=hid, bias=bias)
-#         )
-
-#         # ------- ② 门控分支：3 个尺度捕获模糊模式 -------
-#         self.pw_gate = nn.Conv2d(dim, hid, 1, bias=bias)
-#         self.gate_3x3   = nn.Conv2d(hid, hid, 3, 1, 1,
-#                                     groups=hid, bias=bias)
-#         self.gate_3x3_d = nn.Conv2d(hid, hid, 3, 1,
-#                                     same_pad(3, 2), dilation=2,
-#                                     groups=hid, bias=bias)
-#         self.gate_lka   = self.lka  # 复用实现（参数独立）
-#         self.fuse       = nn.Conv2d(hid * 3, hid, 1, bias=bias)
-
-#         # ------- ③ 频域门控：突出高频细节 -------
-#         self.freq_conv = nn.Sequential(
-#             nn.Conv2d(dim, hid, 1, bias=bias),
-#             nn.Sigmoid()
-#         )
-
-#         # ------- ④ 输出投影 + 残差缩放 -------
-#         self.pw_out = nn.Conv2d(hid, dim, 1, bias=bias)
-#         self.gamma  = nn.Parameter(torch.ones(1) * 0.9)  # 可学习缩放
-
-#     # ---- 频域门控的小函数 --------------------------------------------------
-#     @torch.no_grad()
-#     def _freq_gate(self, x: torch.Tensor) -> torch.Tensor:
-#         """
-#         1. FFT → 幅度谱        (保留模长信息)
-#         2. H/W 方向求平均池化  (减小通道维噪声)
-#         3. 1×1 + Sigmoid      (生成 0~1 权重)
-#         """
-#         fft_mag = torch.abs(torch.fft.rfft2(x, norm='ortho'))  # (B,C,H,W')
-#         mag_pool = torch.mean(fft_mag, dim=-1, keepdim=True)   # → (B,C,H,1)
-#         gate = self.freq_conv(mag_pool)                        # 同形
-#         # rFFT 截半，需要补回宽度；nearest 不引入新值
-#         gate = F.interpolate(gate, size=x.shape[-2:], mode='nearest')
-#         return gate
-
-#     # ---- 前向传播 -----------------------------------------------------------
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         # ① 主干：LN → 3×3 → LKA → GELU
-#         main = F.gelu(self.dw3(self.pw_main(x)))
-#         main = self.lka(main)
-
-#         # ② 门控：多尺度卷积 → concat → fuse
-#         g = self.pw_gate(x)
-#         g_cat = torch.cat([
-#             F.relu(self.gate_3x3(g)),
-#             F.relu(self.gate_3x3_d(g)),
-#             F.relu(self.gate_lka(g))
-#         ], dim=1)
-#         g_all = self.fuse(g_cat)
-
-#         # ③ 频域权重乘到主分支
-#         main = main * self._freq_gate(x)
-
-#         # ④ 输出 (元素乘法 + 1×1 投影) 并残差缩放
-#         return self.pw_out(main * g_all) * self.gamma
-
-
-
-class VSSLocalBlock(nn.Module):
+class VSSFusionBlock(nn.Module):
     def __init__(
         self,
         hidden_dim: int = 0,
@@ -1546,14 +1441,15 @@ class VSSLocalBlock(nn.Module):
         
         self.drop_path = DropPath(drop_path)
         
-        self.local = LocalFeatureModule(dim=hidden_dim)
-        self.fusion = nn.Conv2d(2*hidden_dim, hidden_dim, 1, 1, 0)
+        self.local = LAM(dim=hidden_dim)
+        self.wavelet_branch = HFR(hidden_dim)
+        # self.fusion = nn.Conv2d(2*hidden_dim, hidden_dim, 1, 1, 0)
+        self.fusion = nn.Conv2d(hidden_dim * 3, hidden_dim, 1, 1, 0)  # 3 路分支
         
 
         if self.use_ffn:
             self.norm2 = norm_layer(hidden_dim)
-            self.ffn = DGDFeedForward(dim=hidden_dim, ffn_expansion_factor=2.66, bias=False)
-            #self.ffn = DGDFeedForwardImproved(dim=hidden_dim, ffn_expansion_factor=2.66, bias=False)
+            self.ffn = LDGFFN(dim=hidden_dim, ffn_expansion_factor=2.66, bias=False)
         else:        
             if self.mlp_branch:
                 _MLP = Mlp if not gmlp else gMlp
@@ -1566,11 +1462,14 @@ class VSSLocalBlock(nn.Module):
         
         x_global = self.drop_path(self.op(x_norm)).permute(0, 3, 1, 2).contiguous()
         x_local = self.local(x_norm.permute(0, 3, 1, 2).contiguous())   # LFM
-        x = self.fusion(torch.cat((x_global, x_local), dim=1)).permute(0, 2, 3, 1) + input
-        
+        x_wavelet = self.wavelet_branch(x_norm.permute(0, 3, 1, 2))
+
+        # x = self.fusion(torch.cat((x_global, x_local), dim=1)).permute(0, 2, 3, 1) + input
+        x_cat = torch.cat([x_global, x_local, x_wavelet], dim=1)
+        x = self.fusion(x_cat).permute(0, 2, 3, 1) + input
         # FFN
         if self.use_ffn:   # DGDFFN
-            x_norm2 = self.norm2(x)
+    
             x = self.drop_path(self.ffn(self.norm2(x).permute(0, 3, 1, 2).contiguous())).permute(0, 2, 3, 1).contiguous() + x
         else:
             x = x + self.drop_path(self.mlp(self.norm2(x)))
