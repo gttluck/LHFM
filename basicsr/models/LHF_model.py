@@ -30,11 +30,11 @@ def save_image(tensor, file_path):
 
 
 @MODEL_REGISTRY.register()
-class LIEDNetModel(BaseModel):
+class LHF(BaseModel):
     """Base SR model for single image super-resolution."""
 
     def __init__(self, opt):
-        super(LIEDNetModel, self).__init__(opt)
+        super(LHF, self).__init__(opt)
         # Set random seed and deterministic
         # define network
         self.net_g = build_network(opt['network_g'])
